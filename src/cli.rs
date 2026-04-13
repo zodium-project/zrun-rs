@@ -5,7 +5,8 @@ use clap::{Parser, Subcommand};
 #[command(
     name    = "zrun",
     about   = "A fast TUI script launcher",
-    long_about = "A fast , polished & memory-safe TUI script launcher",
+    long_about = "A fast, polished & memory-safe TUI script launcher",
+    version,
 )]
 pub struct Cli {
     #[command(subcommand)]
