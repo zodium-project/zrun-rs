@@ -37,6 +37,11 @@ impl Script {
         })
     }
 
+    /// Name formatted for display: hyphens → spaces.
+    pub fn display_name(&self) -> String {
+        self.name.replace('-', " ")
+    }
+
     /// Full source as a string (for preview / show).
     pub fn contents(&self) -> String {
         std::fs::read_to_string(&self.path).unwrap_or_else(|e| format!("(error reading file: {e})"))

@@ -62,8 +62,9 @@ pub struct App {
     tag_list:       Vec<String>,
     tag_list_state: ListState,
     tag_pane_right: bool,         // false = left (tag list), true = right (scripts in tag)
-    tag_scripts:    Vec<usize>,   // indices into all_scripts for hovered tag
-    tag_scripts_state: ListState,
+    tag_scripts:        Vec<usize>,   // indices into all_scripts for hovered tag
+    tag_scripts_state:  ListState,
+    tag_scripts_map:    std::collections::HashMap<String, Vec<usize>>,
 
     history:        Vec<history::HistoryEntry>,
     history_state:  ListState,
@@ -77,12 +78,14 @@ pub struct App {
 }
 
 const STATUS_DURATION: Duration = Duration::from_secs(3);
+const SCROLL_PAGE: usize = 10;
+const SCROLL_HALF: usize = 5;
 
 impl App {
     pub fn new(all_scripts: Vec<Script>, config: Config) -> Self {
         let tag_list = scripts::all_tags(&all_scripts);
-        let history  = history::load();
-        let n        = all_scripts.len();
+        let history = history::load();
+        let n       = all_scripts.len();
 
         let filtered: Vec<(usize, i32)> = (0..n).map(|i| (i, 0)).collect();
 
@@ -104,8 +107,9 @@ impl App {
             tag_list,
             tag_list_state: ListState::default(),
             tag_pane_right: false,
-            tag_scripts:    Vec::new(),
-            tag_scripts_state: ListState::default(),
+            tag_scripts:        Vec::new(),
+            tag_scripts_state:  ListState::default(),
+            tag_scripts_map:    std::collections::HashMap::new(),
             history,
             history_state,
             status_msg:     None,
@@ -128,9 +132,9 @@ impl App {
             (0..self.all_scripts.len()).collect()
         };
 
-        let base_scripts: Vec<Script> = base_indices
+        let base_scripts: Vec<&Script> = base_indices
             .iter()
-            .map(|&i| self.all_scripts[i].clone())
+            .map(|&i| &self.all_scripts[i])
             .collect();
 
         let ranked = fuzzy::rank(&self.search_query, &base_scripts);
@@ -261,16 +265,16 @@ impl App {
             }
 
             KeyCode::PageUp => {
-                self.preview_scroll = self.preview_scroll.saturating_sub(10);
+                self.preview_scroll = self.preview_scroll.saturating_sub(SCROLL_PAGE);
             }
             KeyCode::PageDown => {
-                self.preview_scroll = self.preview_scroll.saturating_add(10);
+                self.preview_scroll = self.preview_scroll.saturating_add(SCROLL_PAGE);
             }
             KeyCode::Char('u') if mods.contains(KeyModifiers::CONTROL) => {
-                self.preview_scroll = self.preview_scroll.saturating_sub(5);
+                self.preview_scroll = self.preview_scroll.saturating_sub(SCROLL_HALF);
             }
             KeyCode::Char('d') if mods.contains(KeyModifiers::CONTROL) => {
-                self.preview_scroll = self.preview_scroll.saturating_add(5);
+                self.preview_scroll = self.preview_scroll.saturating_add(SCROLL_HALF);
             }
 
             KeyCode::Char('/') if self.tab == Tab::Scripts => {
@@ -436,17 +440,23 @@ impl App {
     }
 
     fn refresh_tag_scripts(&mut self) {
+        // Rebuild the full map if empty (first call or after reload)
+        if self.tag_scripts_map.is_empty() {
+            for (i, s) in self.all_scripts.iter().enumerate() {
+                for t in &s.tags {
+                    self.tag_scripts_map.entry(t.clone()).or_default().push(i);
+                }
+            }
+        }
+
         let tag = self.tag_list_state.selected()
             .and_then(|i| self.tag_list.get(i))
             .cloned();
-        self.tag_scripts = if let Some(ref t) = tag {
-            self.all_scripts.iter().enumerate()
-                .filter(|(_, s)| s.tags.iter().any(|st| st == t))
-                .map(|(i, _)| i)
-                .collect()
-        } else {
-            Vec::new()
-        };
+
+        self.tag_scripts = tag
+            .and_then(|t| self.tag_scripts_map.get(&t).cloned())
+            .unwrap_or_default();
+
         self.tag_scripts_state.select(if self.tag_scripts.is_empty() { None } else { Some(0) });
     }
 
@@ -619,7 +629,7 @@ impl App {
                 let script = &self.all_scripts[script_idx];
                 let num    = format!("{:>3}  ", pos + 1);
                 let name   = &script.name;
-                let display_name = name.replace('-', " ");
+                let display_name = script.display_name();
 
                 // Fuzzy highlight matched characters
                 let name_spans: Vec<Span> = if self.search_query.is_empty() {
@@ -819,7 +829,7 @@ impl App {
             );
         } else {
             let items: Vec<ListItem> = self.tag_list.iter().map(|tag| {
-                let count = self.all_scripts.iter().filter(|s| s.tags.contains(tag)).count();
+                let count = self.tag_scripts_map.get(tag).map_or(0, |v| v.len());
                 ListItem::new(Line::from(vec![
                     Span::styled(
                         format!(" ⬥ {tag} "),
@@ -868,9 +878,8 @@ impl App {
         } else {
             let items: Vec<ListItem> = self.tag_scripts.iter().map(|&si| {
                 let s = &self.all_scripts[si];
-                let display = s.name.replace('-', " ");
                 ListItem::new(Line::from(Span::styled(
-                    format!(" {display}"),
+                    format!(" {}", s.display_name()),
                     Style::default().add_modifier(Modifier::BOLD),
                 )))
             }).collect();
