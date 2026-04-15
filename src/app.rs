@@ -61,6 +61,9 @@ pub struct App {
     tag_filter:     Option<String>,
     tag_list:       Vec<String>,
     tag_list_state: ListState,
+    tag_pane_right: bool,         // false = left (tag list), true = right (scripts in tag)
+    tag_scripts:    Vec<usize>,   // indices into all_scripts for hovered tag
+    tag_scripts_state: ListState,
 
     history:        Vec<history::HistoryEntry>,
     history_state:  ListState,
@@ -100,6 +103,9 @@ impl App {
             tag_filter:     None,
             tag_list,
             tag_list_state: ListState::default(),
+            tag_pane_right: false,
+            tag_scripts:    Vec::new(),
+            tag_scripts_state: ListState::default(),
             history,
             history_state,
             status_msg:     None,
@@ -182,6 +188,10 @@ impl App {
                 self.search_query.clear();
                 self.refilter();
             }
+            KeyCode::Char('/') => {
+                // toggle off search mode, keep query
+                self.mode = InputMode::Normal;
+            }
             KeyCode::Enter => {
                 self.mode = InputMode::Normal;
             }
@@ -223,10 +233,27 @@ impl App {
                 }
 
                 self.preview_scroll = 0;
+                if self.tab == Tab::Tags {
+                    self.tag_pane_right = false;
+                    self.refresh_tag_scripts();
+                }
             }
 
             KeyCode::Up   | KeyCode::Char('k') => self.move_sel(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_sel(1),
+            KeyCode::Left | KeyCode::Char('h') => {
+                if self.tab == Tab::Tags && self.tag_pane_right {
+                    self.tag_pane_right = false;
+                }
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                if self.tab == Tab::Tags && !self.tag_pane_right && !self.tag_scripts.is_empty() {
+                    self.tag_pane_right = true;
+                    if self.tag_scripts_state.selected().is_none() {
+                        self.tag_scripts_state.select(Some(0));
+                    }
+                }
+            }
             KeyCode::Char('g') | KeyCode::Home => self.jump_sel(0),
             KeyCode::Char('G') | KeyCode::End  => {
                 let last = self.current_list_len().saturating_sub(1);
@@ -247,7 +274,11 @@ impl App {
             }
 
             KeyCode::Char('/') if self.tab == Tab::Scripts => {
-                self.mode = InputMode::Search;
+                if self.mode == InputMode::Search {
+                    self.mode = InputMode::Normal;
+                } else {
+                    self.mode = InputMode::Search;
+                }
             }
 
             KeyCode::Esc => {
@@ -266,6 +297,8 @@ impl App {
                     if self.tag_list_state.selected().is_none() && !self.tag_list.is_empty() {
                         self.tag_list_state.select(Some(0));
                     }
+                    self.tag_pane_right = false;
+                    self.refresh_tag_scripts();
                 } else if self.tab == Tab::Tags {
                     self.apply_tag();
                 }
@@ -317,7 +350,6 @@ impl App {
             Tab::History => self.history_state.selected()
                 .and_then(|i| self.history.get(i))
                 .map(|e| {
-                    // Prefer live path if script still exists there, else fall back to stored
                     let live = scripts::find_by_name(&self.all_scripts, &e.name);
                     AppResult::RunScript {
                         path: live.map(|s| s.path.to_string_lossy().into_owned())
@@ -325,7 +357,21 @@ impl App {
                         name: e.name.clone(),
                     }
                 }),
-            Tab::Tags => { self.apply_tag(); None }
+            Tab::Tags => {
+                if self.tag_pane_right {
+                    // Launch selected script from right pane
+                    self.tag_scripts_state.selected()
+                        .and_then(|i| self.tag_scripts.get(i))
+                        .and_then(|&si| self.all_scripts.get(si))
+                        .map(|s| AppResult::RunScript {
+                            path: s.path.to_string_lossy().into_owned(),
+                            name: s.name.clone(),
+                        })
+                } else {
+                    self.apply_tag();
+                    None
+                }
+            }
         }
     }
 
@@ -341,7 +387,7 @@ impl App {
         match self.tab {
             Tab::Scripts => self.filtered.len(),
             Tab::History => self.history.len(),
-            Tab::Tags    => self.tag_list.len(),
+            Tab::Tags    => if self.tag_pane_right { self.tag_scripts.len() } else { self.tag_list.len() },
         }
     }
 
@@ -349,7 +395,7 @@ impl App {
         match self.tab {
             Tab::Scripts => &mut self.list_state,
             Tab::History => &mut self.history_state,
-            Tab::Tags    => &mut self.tag_list_state,
+            Tab::Tags    => if self.tag_pane_right { &mut self.tag_scripts_state } else { &mut self.tag_list_state },
         }
     }
 
@@ -362,6 +408,9 @@ impl App {
         if self.tab == Tab::Scripts {
             self.preview_scroll = 0;
             self.preview_cache  = None;
+        }
+        if self.tab == Tab::Tags && !self.tag_pane_right {
+            self.refresh_tag_scripts();
         }
     }
 
@@ -377,10 +426,28 @@ impl App {
         if self.tab == Tab::Scripts {
             self.preview_cache = None;
         }
+        if self.tab == Tab::Tags && !self.tag_pane_right {
+            self.refresh_tag_scripts();
+        }
     }
 
     fn set_status(&mut self, msg: String) {
         self.status_msg = Some((msg, Instant::now()));
+    }
+
+    fn refresh_tag_scripts(&mut self) {
+        let tag = self.tag_list_state.selected()
+            .and_then(|i| self.tag_list.get(i))
+            .cloned();
+        self.tag_scripts = if let Some(ref t) = tag {
+            self.all_scripts.iter().enumerate()
+                .filter(|(_, s)| s.tags.iter().any(|st| st == t))
+                .map(|(i, _)| i)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        self.tag_scripts_state.select(if self.tag_scripts.is_empty() { None } else { Some(0) });
     }
 
     // ── Draw ──────────────────────────────────────────────────
@@ -451,7 +518,7 @@ impl App {
 
         if let Some(ref tag) = self.tag_filter {
             spans.push(Span::styled(
-                format!("  #{tag}"),
+                format!("  ⬥ {tag}"),
                 Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
             ));
         }
@@ -534,7 +601,7 @@ impl App {
             let cursor = if self.mode == InputMode::Search { "█" } else { "" };
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
-                    Span::styled(" / ", Style::default().fg(Color::Yellow)),
+                    Span::styled(" > ", Style::default().fg(Color::Yellow)),
                     Span::styled(self.search_query.clone(), Style::default().fg(Color::Yellow)),
                     Span::styled(cursor, Style::default().fg(Color::Yellow)),
                 ])),
@@ -552,17 +619,18 @@ impl App {
                 let script = &self.all_scripts[script_idx];
                 let num    = format!("{:>3}  ", pos + 1);
                 let name   = &script.name;
+                let display_name = name.replace('-', " ");
 
                 // Fuzzy highlight matched characters
                 let name_spans: Vec<Span> = if self.search_query.is_empty() {
-                    vec![Span::raw(name.clone())]
+                    vec![Span::raw(display_name.clone())]
                 } else {
                     let positions = fuzzy::match_positions(&self.search_query, name);
                     let mut pos_iter = positions.into_iter().peekable();
                     let mut spans = Vec::new();
                     let mut buf   = String::new();
 
-                    for (i, ch) in name.chars().enumerate() {
+                    for (i, ch) in display_name.chars().enumerate() {
                         if pos_iter.peek().copied() == Some(i) {
                             let _ = pos_iter.next();
                             if !buf.is_empty() {
@@ -583,7 +651,7 @@ impl App {
                     spans
                 };
 
-                let name_char_len = name.chars().count();
+                let name_char_len = display_name.chars().count();
                 let used = num.len() + name_char_len;
                 let pad  = " ".repeat(avail.saturating_sub(used));
 
@@ -723,10 +791,18 @@ impl App {
     // ── Tags tab ──────────────────────────────────────────────
 
     fn draw_tags_tab(&mut self, frame: &mut Frame, area: Rect) {
-        let block = Block::default()
+        // Split into left (tag list) and right (scripts in tag) panes
+        let panes = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
+            .split(area);
+
+        // ── Left: tag list ──
+        let left_active = !self.tag_pane_right;
+        let left_block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(Color::DarkGray))
+            .border_style(Style::default().fg(if left_active { Color::Cyan } else { Color::DarkGray }))
             .title(Span::styled(
                 " Tags ",
                 Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
@@ -735,35 +811,77 @@ impl App {
         if self.tag_list.is_empty() {
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
-                    "  No tags found.  Add  # @tags: foo, bar  to your scripts.",
+                    "  No tags found.",
                     Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
                 )))
-                .block(block),
-                area,
+                .block(left_block),
+                panes[0],
             );
-            return;
+        } else {
+            let items: Vec<ListItem> = self.tag_list.iter().map(|tag| {
+                let count = self.all_scripts.iter().filter(|s| s.tags.contains(tag)).count();
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        format!(" ⬥ {tag} "),
+                        Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("({count})"),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]))
+            }).collect();
+
+            let list = List::new(items)
+                .block(left_block)
+                .highlight_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+                .highlight_symbol("▶ ");
+
+            frame.render_stateful_widget(list, panes[0], &mut self.tag_list_state);
         }
 
-        let items: Vec<ListItem> = self.tag_list.iter().map(|tag| {
-            let count = self.all_scripts.iter().filter(|s| s.tags.contains(tag)).count();
-            ListItem::new(Line::from(vec![
-                Span::styled(
-                    format!(" #{tag} "),
-                    Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("({count} script{})", if count == 1 { "" } else { "s" }),
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]))
-        }).collect();
+        // ── Right: scripts for hovered tag ──
+        let hovered_tag = self.tag_list_state.selected()
+            .and_then(|i| self.tag_list.get(i))
+            .cloned()
+            .unwrap_or_default();
 
-        let list = List::new(items)
-            .block(block)
-            .highlight_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
-            .highlight_symbol("▶ ");
+        let right_active = self.tag_pane_right;
+        let right_block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(if right_active { Color::Cyan } else { Color::DarkGray }))
+            .title(Span::styled(
+                format!(" Scripts tagged ⬥ {hovered_tag} "),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ));
 
-        frame.render_stateful_widget(list, area, &mut self.tag_list_state);
+        if self.tag_scripts.is_empty() {
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    "  No scripts.",
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                )))
+                .block(right_block),
+                panes[1],
+            );
+        } else {
+            let items: Vec<ListItem> = self.tag_scripts.iter().map(|&si| {
+                let s = &self.all_scripts[si];
+                let display = s.name.replace('-', " ");
+                ListItem::new(Line::from(Span::styled(
+                    format!(" {display}"),
+                    Style::default().add_modifier(Modifier::BOLD),
+                )))
+            }).collect();
+
+            let list = List::new(items)
+                .block(right_block)
+                .highlight_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+                .highlight_symbol("▶ ");
+
+            frame.render_stateful_widget(list, panes[1], &mut self.tag_scripts_state);
+        }
     }
 
     // ── Footer ────────────────────────────────────────────────
@@ -799,8 +917,9 @@ impl App {
                 ],
                 (Tab::Tags, _) => &[
                     ("↑↓/jk", "navigate"),
-                    ("enter/t", "filter"),
-                    ("T", "clear"),
+                    ("←→/hl", "switch pane"),
+                    ("enter", "run/filter"),
+                    ("T", "clear filter"),
                     ("tab", "scripts"),
                     ("q", "quit"),
                 ],
