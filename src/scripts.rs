@@ -16,6 +16,8 @@ pub struct Script {
     pub description: String,
     /// Tags parsed from `# @tags: foo, bar` anywhere in the file.
     pub tags: Vec<String>,
+    /// Info block: lines under `# @info:` or a `# @info` sentinel, up to 40 lines.
+    pub info: String,
 }
 
 impl Script {
@@ -27,13 +29,14 @@ impl Script {
             .into_owned();
 
         let content = std::fs::read_to_string(&path).ok()?;
-        let (description, tags) = parse_header(&content);
+        let (description, tags, info) = parse_header(&content);
 
         Some(Script {
             name,
             path,
             description,
             tags,
+            info,
         })
     }
 
@@ -51,26 +54,31 @@ impl Script {
 // ── Header parsing ────────────────────────────────────────────
 
 /// Scan up to 40 lines for:
-///   - First non-shebang `# …` line → description
-///   - `# @tags: foo, bar`          → tags vec
-///   - `# @tag: foo`                → single tag
-fn parse_header(content: &str) -> (String, Vec<String>) {
+///   - First non-shebang `# …` line  → description
+///   - `# @tags: foo, bar`           → tags vec
+///   - `# @tag: foo`                 → single tag
+///   - `# @info: single line`        → info (single-line form)
+///   - `# @info` followed by `# …`   → info (multi-line block until blank/non-comment)
+fn parse_header(content: &str) -> (String, Vec<String>, String) {
     let mut description = String::new();
     let mut tags: Vec<String> = Vec::new();
+    let mut info_lines: Vec<String> = Vec::new();
+    let mut in_info_block = false;
 
     for line in content.lines().take(40) {
-        let line = line.trim();
+        let trimmed = line.trim();
 
-        // Skip shebangs
-        if line.starts_with("#!") {
+        if trimmed.starts_with("#!") {
+            in_info_block = false;
             continue;
         }
 
-        if let Some(rest) = line.strip_prefix('#') {
+        if let Some(rest) = trimmed.strip_prefix('#') {
             let rest = rest.trim();
 
-            // Tags directive
+            // @tags / @tag directive
             if let Some(tag_str) = rest.strip_prefix("@tags:").or_else(|| rest.strip_prefix("@tag:")) {
+                in_info_block = false;
                 for t in tag_str.split(',') {
                     let t = t.trim().to_lowercase();
                     if !t.is_empty() {
@@ -80,14 +88,40 @@ fn parse_header(content: &str) -> (String, Vec<String>) {
                 continue;
             }
 
+            // @info: single-line form  →  `# @info: some text`
+            if let Some(inline) = rest.strip_prefix("@info:") {
+                in_info_block = false;
+                let text = inline.trim();
+                if !text.is_empty() {
+                    info_lines.push(text.to_owned());
+                }
+                continue;
+            }
+
+            // @info sentinel  →  `# @info` (block start)
+            if rest == "@info" {
+                in_info_block = true;
+                continue;
+            }
+
+            // Inside an @info block: accumulate continuation comment lines
+            if in_info_block {
+                info_lines.push(rest.to_owned());
+                continue;
+            }
+
             // First plain comment → description
             if description.is_empty() && !rest.is_empty() && !rest.starts_with('@') {
                 description = rest.to_owned();
             }
+        } else {
+            // Non-comment line ends any open @info block
+            in_info_block = false;
         }
     }
 
-    (description, tags)
+    let info = info_lines.join("\n");
+    (description, tags, info)
 }
 
 // ── Discovery ─────────────────────────────────────────────────

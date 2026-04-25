@@ -71,9 +71,10 @@ pub struct App {
 
     status_msg:     Option<(String, Instant)>,
 
-    // (script_index, raw file contents) — only reloaded on selection change
-    preview_cache:  Option<(usize, String)>,
+    // (script_index, raw file contents, parsed lines) — only reloaded on selection change
+    preview_cache:  Option<(usize, String, Vec<String>)>,
 
+    info_scroll:    usize,
     dry_run:        bool,
 }
 
@@ -114,6 +115,7 @@ impl App {
             history_state,
             status_msg:     None,
             preview_cache:  None,
+            info_scroll:    0,
             dry_run:        config.dry_run,
         }
     }
@@ -168,11 +170,12 @@ impl App {
         let Some(si) = self.selected_script_idx() else { return };
         let stale = self.preview_cache
             .as_ref()
-            .map(|(ci, _)| *ci != si)
+            .map(|(ci, _, _)| *ci != si)
             .unwrap_or(true);
         if stale {
             let contents = self.all_scripts[si].contents();
-            self.preview_cache = Some((si, contents));
+            let lines: Vec<String> = contents.lines().map(|l| l.to_owned()).collect();
+            self.preview_cache = Some((si, contents, lines));
         }
     }
 
@@ -193,11 +196,11 @@ impl App {
                 self.refilter();
             }
             KeyCode::Char('/') => {
-                // toggle off search mode, keep query
                 self.mode = InputMode::Normal;
             }
             KeyCode::Enter => {
                 self.mode = InputMode::Normal;
+                return self.action_run();
             }
             KeyCode::Backspace => {
                 self.search_query.pop();
@@ -411,6 +414,7 @@ impl App {
         self.active_list_state_mut().select(Some(next));
         if self.tab == Tab::Scripts {
             self.preview_scroll = 0;
+            self.info_scroll    = 0;
             self.preview_cache  = None;
         }
         if self.tab == Tab::Tags && !self.tag_pane_right {
@@ -427,6 +431,7 @@ impl App {
         }
 
         self.preview_scroll = 0;
+        self.info_scroll    = 0;
         if self.tab == Tab::Scripts {
             self.preview_cache = None;
         }
@@ -570,28 +575,57 @@ impl App {
         let inner = outer.inner(area);
         frame.render_widget(outer, area);
 
-        let panes = Layout::default()
+        let horiz = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(inner);
 
-        self.draw_script_list(frame, panes[0]);
+        self.draw_script_list(frame, horiz[0]);
 
-        // Divider between list and preview
+        // Vertical divider between list and right column
         frame.render_widget(
             Block::default()
                 .borders(Borders::LEFT)
                 .border_style(Style::default().fg(Color::DarkGray)),
-            Rect { x: panes[1].x, y: panes[1].y, width: 1, height: panes[1].height },
+            Rect { x: horiz[1].x, y: horiz[1].y, width: 1, height: horiz[1].height },
         );
 
-        let preview_area = Rect {
-            x:      panes[1].x + 1,
-            y:      panes[1].y,
-            width:  panes[1].width.saturating_sub(1),
-            height: panes[1].height,
+        let right = Rect {
+            x:      horiz[1].x + 1,
+            y:      horiz[1].y,
+            width:  horiz[1].width.saturating_sub(1),
+            height: horiz[1].height,
         };
+
+        // Split right column: preview (top 70%) / info (bottom 30%)
+        let info_height = (right.height / 3).max(3);
+        let preview_height = right.height.saturating_sub(info_height + 1); // +1 for divider
+
+        let preview_area = Rect { x: right.x, y: right.y, width: right.width, height: preview_height };
+
+        let divider_area = Rect { x: right.x, y: right.y + preview_height, width: right.width, height: 1 };
+
+        let info_area = Rect {
+            x:      right.x,
+            y:      right.y + preview_height + 1,
+            width:  right.width,
+            height: info_height,
+        };
+
         self.draw_preview(frame, preview_area);
+
+        frame.render_widget(
+            Block::default()
+                .borders(Borders::TOP)
+                .border_style(Style::default().fg(Color::DarkGray))
+                .title(Span::styled(
+                    " Info ",
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                )),
+            divider_area,
+        );
+
+        self.draw_info_pane(frame, info_area);
     }
 
     fn draw_script_list(&mut self, frame: &mut Frame, area: Rect) {
@@ -683,7 +717,7 @@ impl App {
     }
 
     fn draw_preview(&mut self, frame: &mut Frame, area: Rect) {
-        let Some((_, ref contents)) = self.preview_cache else {
+        let Some((_, _, ref lines)) = self.preview_cache else {
             frame.render_widget(
                 Paragraph::new(Span::styled(
                     "  No script selected.",
@@ -694,41 +728,31 @@ impl App {
             return;
         };
 
-        let all_lines: Vec<&str> = contents.lines().collect();
-        let total_lines = all_lines.len();
-
-        // Clamp scroll
-        let visible = area.height as usize;
-        let max_scroll = total_lines.saturating_sub(visible);
+        let total_lines = lines.len();
+        let visible     = area.height as usize;
+        let max_scroll  = total_lines.saturating_sub(visible);
         self.preview_scroll = self.preview_scroll.min(max_scroll);
 
         let has_scrollbar = total_lines > visible;
         let text_area = if has_scrollbar && area.width > 1 {
-            Rect {
-                x: area.x,
-                y: area.y,
-                width: area.width - 1,
-                height: area.height,
-            }
+            Rect { x: area.x, y: area.y, width: area.width - 1, height: area.height }
         } else {
             area
         };
 
-        // Render only the visible window — no syntax highlighting
         let start = self.preview_scroll;
         let end   = (start + visible).min(total_lines);
 
-        let lines: Vec<Line> = all_lines[start..end]
+        let rendered: Vec<Line> = lines[start..end]
             .iter()
-            .map(|line| Line::from(Span::raw((*line).to_string())))
+            .map(|l| Line::from(Span::raw(l.as_str())))
             .collect();
 
         frame.render_widget(
-            Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false }),
+            Paragraph::new(Text::from(rendered)).wrap(Wrap { trim: false }),
             text_area,
         );
 
-        // Scrollbar — only if content overflows
         if has_scrollbar {
             use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState};
             let mut sb = ScrollbarState::new(max_scroll).position(self.preview_scroll);
@@ -736,15 +760,41 @@ impl App {
                 Scrollbar::new(ScrollbarOrientation::VerticalRight)
                     .begin_symbol(None)
                     .end_symbol(None),
-                Rect {
-                    x:      area.x + area.width - 1,
-                    y:      area.y,
-                    width:  1,
-                    height: area.height,
-                },
+                Rect { x: area.x + area.width - 1, y: area.y, width: 1, height: area.height },
                 &mut sb,
             );
         }
+    }
+
+    fn draw_info_pane(&self, frame: &mut Frame, area: Rect) {
+        let script = self.selected_script();
+
+        let info = script.map(|s| s.info.as_str()).unwrap_or("");
+
+        if info.is_empty() {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    "  No info available.",
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                )),
+                area,
+            );
+            return;
+        }
+
+        let lines: Vec<Line> = info
+            .lines()
+            .map(|l| Line::from(Span::styled(
+                format!("  {l}"),
+                Style::default().fg(Color::White),
+            )))
+            .collect();
+
+        frame.render_widget(
+            Paragraph::new(Text::from(lines))
+                .wrap(Wrap { trim: false }),
+            area,
+        );
     }
 
     // ── History tab ───────────────────────────────────────────
