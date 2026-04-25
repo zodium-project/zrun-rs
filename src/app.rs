@@ -83,6 +83,8 @@ pub struct App {
     rect_tab_scripts: Rect,
     rect_tab_history: Rect,
     rect_tab_tags:    Rect,
+    rect_tag_left:    Rect,
+    rect_tag_right:   Rect,
     // (col, row, instant) of last left-click for double-click detection
     last_click:     Option<(u16, u16, Instant)>,
 
@@ -133,6 +135,8 @@ impl App {
             rect_tab_scripts: Rect::default(),
             rect_tab_history: Rect::default(),
             rect_tab_tags:    Rect::default(),
+            rect_tag_left:    Rect::default(),
+            rect_tag_right:   Rect::default(),
             last_click:     None,
             dry_run:        config.dry_run,
         }
@@ -246,6 +250,13 @@ impl App {
                     } else if rect_contains(self.rect_list, col, row) {
                         self.move_sel(-1);
                     }
+                } else if self.tab == Tab::Tags {
+                    if rect_contains(self.rect_tag_right, col, row) {
+                        self.tag_pane_right = true;
+                    } else {
+                        self.tag_pane_right = false;
+                    }
+                    self.move_sel(-1);
                 } else {
                     self.move_sel(-1);
                 }
@@ -259,6 +270,13 @@ impl App {
                     } else if rect_contains(self.rect_list, col, row) {
                         self.move_sel(1);
                     }
+                } else if self.tab == Tab::Tags {
+                    if rect_contains(self.rect_tag_right, col, row) {
+                        self.tag_pane_right = true;
+                    } else {
+                        self.tag_pane_right = false;
+                    }
+                    self.move_sel(1);
                 } else {
                     self.move_sel(1);
                 }
@@ -284,6 +302,33 @@ impl App {
                     self.tag_pane_right = false;
                     self.refresh_tag_scripts();
                     return None;
+                }
+
+                // Tag pane clicks
+                if self.tab == Tab::Tags {
+                    if rect_contains(self.rect_tag_left, col, row) {
+                        self.tag_pane_right = false;
+                        let inner_y = self.rect_tag_left.y + 1; // skip border
+                        if row >= inner_y {
+                            let idx = (row - inner_y) as usize;
+                            if idx < self.tag_list.len() {
+                                self.tag_list_state.select(Some(idx));
+                                self.refresh_tag_scripts();
+                            }
+                        }
+                        return None;
+                    }
+                    if rect_contains(self.rect_tag_right, col, row) && !self.tag_scripts.is_empty() {
+                        self.tag_pane_right = true;
+                        let inner_y = self.rect_tag_right.y + 1; // skip border
+                        if row >= inner_y {
+                            let idx = (row - inner_y) as usize;
+                            if idx < self.tag_scripts.len() {
+                                self.tag_scripts_state.select(Some(idx));
+                            }
+                        }
+                        return None;
+                    }
                 }
 
                 if self.tab == Tab::Scripts && rect_contains(self.rect_list, col, row) {
@@ -985,6 +1030,9 @@ impl App {
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
             .split(area);
+
+        self.rect_tag_left  = panes[0];
+        self.rect_tag_right = panes[1];
 
         // ── Left: tag list ──
         let left_active = !self.tag_pane_right;
