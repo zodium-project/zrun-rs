@@ -174,7 +174,7 @@ impl App {
             .unwrap_or(true);
         if stale {
             let contents = self.all_scripts[si].contents();
-            let lines: Vec<String> = contents.lines().map(|l| l.to_owned()).collect();
+            let lines = strip_comments(&contents);
             self.preview_cache = Some((si, contents, lines));
         }
     }
@@ -1001,6 +1001,39 @@ impl App {
 
         frame.render_widget(Paragraph::new(line), area);
     }
+}
+
+// ── Comment stripping ─────────────────────────────────────────
+
+/// Returns the script lines with all comment lines removed (shebang included),
+/// and consecutive blank lines collapsed into one so the result stays readable.
+fn strip_comments(contents: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut last_blank = true; // suppress leading blanks too
+
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            // comment or shebang — skip entirely
+            continue;
+        }
+        if trimmed.is_empty() {
+            if !last_blank {
+                out.push(String::new());
+                last_blank = true;
+            }
+        } else {
+            out.push(line.to_owned());
+            last_blank = false;
+        }
+    }
+
+    // Trim trailing blank lines
+    while out.last().map(|l: &String| l.trim().is_empty()).unwrap_or(false) {
+        out.pop();
+    }
+
+    out
 }
 
 // ── Event loop ────────────────────────────────────────────────
