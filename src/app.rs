@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
@@ -75,6 +75,14 @@ pub struct App {
     preview_cache:  Option<(usize, String, Vec<String>)>,
 
     info_scroll:    usize,
+
+    // Hit-rects updated every draw for mouse hit-testing
+    rect_list:      Rect,
+    rect_preview:   Rect,
+    rect_info:      Rect,
+    // (col, row, instant) of last left-click for double-click detection
+    last_click:     Option<(u16, u16, Instant)>,
+
     dry_run:        bool,
 }
 
@@ -116,6 +124,10 @@ impl App {
             status_msg:     None,
             preview_cache:  None,
             info_scroll:    0,
+            rect_list:      Rect::default(),
+            rect_preview:   Rect::default(),
+            rect_info:      Rect::default(),
+            last_click:     None,
             dry_run:        config.dry_run,
         }
     }
@@ -212,6 +224,73 @@ impl App {
             }
             KeyCode::Up   => self.move_sel(-1),
             KeyCode::Down => self.move_sel(1),
+            _ => {}
+        }
+        None
+    }
+
+    fn handle_mouse(&mut self, kind: MouseEventKind, col: u16, row: u16) -> Option<AppResult> {
+        match kind {
+            MouseEventKind::ScrollUp => {
+                if self.tab == Tab::Scripts {
+                    if rect_contains(self.rect_preview, col, row) {
+                        self.preview_scroll = self.preview_scroll.saturating_sub(1);
+                    } else if rect_contains(self.rect_info, col, row) {
+                        self.info_scroll = self.info_scroll.saturating_sub(1);
+                    } else if rect_contains(self.rect_list, col, row) {
+                        self.move_sel(-1);
+                    }
+                } else {
+                    self.move_sel(-1);
+                }
+            }
+            MouseEventKind::ScrollDown => {
+                if self.tab == Tab::Scripts {
+                    if rect_contains(self.rect_preview, col, row) {
+                        self.preview_scroll = self.preview_scroll.saturating_add(1);
+                    } else if rect_contains(self.rect_info, col, row) {
+                        self.info_scroll = self.info_scroll.saturating_add(1);
+                    } else if rect_contains(self.rect_list, col, row) {
+                        self.move_sel(1);
+                    }
+                } else {
+                    self.move_sel(1);
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                if self.tab == Tab::Scripts && rect_contains(self.rect_list, col, row) {
+                    let search_offset = if self.mode == InputMode::Search
+                        || !self.search_query.is_empty() { 1 } else { 0 };
+                    let list_row = (row - self.rect_list.y) as usize;
+                    if list_row >= search_offset {
+                        let idx = list_row - search_offset;
+                        if idx < self.filtered.len() {
+                            let now = Instant::now();
+                            let is_double = self.last_click
+                                .as_ref()
+                                .map(|(lc, lr, lt)| *lc == col && *lr == row && lt.elapsed().as_millis() < 400)
+                                .unwrap_or(false);
+
+                            if is_double {
+                                self.last_click = None;
+                                self.list_state.select(Some(idx));
+                                self.preview_scroll = 0;
+                                self.info_scroll    = 0;
+                                self.preview_cache  = None;
+                                return self.action_run();
+                            } else {
+                                self.last_click = Some((col, row, now));
+                                if self.list_state.selected() != Some(idx) {
+                                    self.list_state.select(Some(idx));
+                                    self.preview_scroll = 0;
+                                    self.info_scroll    = 0;
+                                    self.preview_cache  = None;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             _ => {}
         }
         None
@@ -580,6 +659,7 @@ impl App {
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(inner);
 
+        self.rect_list = horiz[0];
         self.draw_script_list(frame, horiz[0]);
 
         // Vertical divider between list and right column
@@ -612,6 +692,7 @@ impl App {
             height: info_height,
         };
 
+        self.rect_preview = preview_area;
         self.draw_preview(frame, preview_area);
 
         frame.render_widget(
@@ -625,6 +706,7 @@ impl App {
             divider_area,
         );
 
+        self.rect_info = info_area;
         self.draw_info_pane(frame, info_area);
     }
 
@@ -1003,6 +1085,13 @@ impl App {
     }
 }
 
+// ── Mouse helpers ─────────────────────────────────────────────
+
+#[inline]
+fn rect_contains(r: Rect, col: u16, row: u16) -> bool {
+    col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height
+}
+
 // ── Comment stripping ─────────────────────────────────────────
 
 /// Returns the script lines with all comment lines removed (shebang included),
@@ -1058,6 +1147,11 @@ pub fn run_tui(
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     if let Some(result) = app.handle_key(key.code, key.modifiers) {
+                        return Ok(result);
+                    }
+                }
+                Event::Mouse(m) => {
+                    if let Some(result) = app.handle_mouse(m.kind, m.column, m.row) {
                         return Ok(result);
                     }
                 }
