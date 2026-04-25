@@ -80,6 +80,9 @@ pub struct App {
     rect_list:      Rect,
     rect_preview:   Rect,
     rect_info:      Rect,
+    rect_tab_scripts: Rect,
+    rect_tab_history: Rect,
+    rect_tab_tags:    Rect,
     // (col, row, instant) of last left-click for double-click detection
     last_click:     Option<(u16, u16, Instant)>,
 
@@ -127,6 +130,9 @@ impl App {
             rect_list:      Rect::default(),
             rect_preview:   Rect::default(),
             rect_info:      Rect::default(),
+            rect_tab_scripts: Rect::default(),
+            rect_tab_history: Rect::default(),
+            rect_tab_tags:    Rect::default(),
             last_click:     None,
             dry_run:        config.dry_run,
         }
@@ -258,6 +264,28 @@ impl App {
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
+                // Tab bar clicks
+                if rect_contains(self.rect_tab_scripts, col, row) {
+                    self.tab = Tab::Scripts;
+                    self.preview_scroll = 0;
+                    return None;
+                }
+                if rect_contains(self.rect_tab_history, col, row) {
+                    self.tab = Tab::History;
+                    self.preview_scroll = 0;
+                    return None;
+                }
+                if rect_contains(self.rect_tab_tags, col, row) {
+                    self.tab = Tab::Tags;
+                    self.preview_scroll = 0;
+                    if self.tag_list_state.selected().is_none() && !self.tag_list.is_empty() {
+                        self.tag_list_state.select(Some(0));
+                    }
+                    self.tag_pane_right = false;
+                    self.refresh_tag_scripts();
+                    return None;
+                }
+
                 if self.tab == Tab::Scripts && rect_contains(self.rect_list, col, row) {
                     let search_offset = if self.mode == InputMode::Search
                         || !self.search_query.is_empty() { 1 } else { 0 };
@@ -574,7 +602,7 @@ impl App {
 
     // ── Header ────────────────────────────────────────────────
 
-    fn draw_header(&self, frame: &mut Frame, area: Rect) {
+    fn draw_header(&mut self, frame: &mut Frame, area: Rect) {
         let version = env!("CARGO_PKG_VERSION");
 
         let tab_style = |active: bool| {
@@ -588,26 +616,45 @@ impl App {
             }
         };
 
+        // Prefix before tabs: " zrun vX.Y.Z  "
+        let prefix_len = format!(" zrun v{version}   ").len() as u16;
+
+        let scripts_label = format!("[ Scripts {}/{} ]", self.filtered.len(), self.all_scripts.len());
+        let history_label = format!("[ History {} ]", self.history.len());
+        let tags_label    = format!("[ Tags {} ]", self.tag_list.len());
+
+        // Store rects for click detection (row = header area row, height = 1)
+        let hrow = area.y;
+        self.rect_tab_scripts = Rect {
+            x: area.x + prefix_len,
+            y: hrow,
+            width: scripts_label.len() as u16,
+            height: 1,
+        };
+        self.rect_tab_history = Rect {
+            x: area.x + prefix_len + scripts_label.len() as u16 + 1,
+            y: hrow,
+            width: history_label.len() as u16,
+            height: 1,
+        };
+        self.rect_tab_tags = Rect {
+            x: area.x + prefix_len + scripts_label.len() as u16 + 1 + history_label.len() as u16 + 1,
+            y: hrow,
+            width: tags_label.len() as u16,
+            height: 1,
+        };
+
         let mut spans = vec![
             Span::styled(
                 format!(" zrun v{version} "),
                 Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             ),
             Span::raw("  "),
-            Span::styled(
-                format!("[ Scripts {}/{} ]", self.filtered.len(), self.all_scripts.len()),
-                tab_style(self.tab == Tab::Scripts),
-            ),
+            Span::styled(scripts_label, tab_style(self.tab == Tab::Scripts)),
             Span::raw(" "),
-            Span::styled(
-                format!("[ History {} ]", self.history.len()),
-                tab_style(self.tab == Tab::History),
-            ),
+            Span::styled(history_label, tab_style(self.tab == Tab::History)),
             Span::raw(" "),
-            Span::styled(
-                format!("[ Tags {} ]", self.tag_list.len()),
-                tab_style(self.tab == Tab::Tags),
-            ),
+            Span::styled(tags_label, tab_style(self.tab == Tab::Tags)),
         ];
 
         if let Some(ref tag) = self.tag_filter {
