@@ -940,10 +940,10 @@ impl App {
         }
     }
 
-    fn draw_info_pane(&self, frame: &mut Frame, area: Rect) {
+    fn draw_info_pane(&mut self, frame: &mut Frame, area: Rect) {
         let script = self.selected_script();
 
-        let info = script.map(|s| s.info.as_str()).unwrap_or("");
+        let info = script.map(|s| s.info.as_str()).unwrap_or("").to_owned();
 
         if info.is_empty() {
             frame.render_widget(
@@ -956,19 +956,47 @@ impl App {
             return;
         }
 
-        let lines: Vec<Line> = info
+        let lines: Vec<String> = info
             .lines()
-            .map(|l| Line::from(Span::styled(
-                format!("  {l}"),
-                Style::default().fg(Color::White),
-            )))
+            .map(|l| format!("  {l}"))
+            .collect();
+
+        let total      = lines.len();
+        let visible    = area.height as usize;
+        let max_scroll = total.saturating_sub(visible);
+        self.info_scroll = self.info_scroll.min(max_scroll);
+
+        let has_scrollbar = total > visible;
+        let text_area = if has_scrollbar && area.width > 1 {
+            Rect { x: area.x, y: area.y, width: area.width - 1, height: area.height }
+        } else {
+            area
+        };
+
+        let start = self.info_scroll;
+        let end   = (start + visible).min(total);
+
+        let rendered: Vec<Line> = lines[start..end]
+            .iter()
+            .map(|l| Line::from(Span::styled(l.as_str(), Style::default().fg(Color::White))))
             .collect();
 
         frame.render_widget(
-            Paragraph::new(Text::from(lines))
-                .wrap(Wrap { trim: false }),
-            area,
+            Paragraph::new(Text::from(rendered)).wrap(Wrap { trim: false }),
+            text_area,
         );
+
+        if has_scrollbar {
+            use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState};
+            let mut sb = ScrollbarState::new(max_scroll).position(self.info_scroll);
+            frame.render_stateful_widget(
+                Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                    .begin_symbol(None)
+                    .end_symbol(None),
+                Rect { x: area.x + area.width - 1, y: area.y, width: 1, height: area.height },
+                &mut sb,
+            );
+        }
     }
 
     // ── History tab ───────────────────────────────────────────
